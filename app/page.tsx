@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Line, OrbitControls } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { Line2 } from "three-stdlib";
@@ -9,33 +9,69 @@ import * as THREE from "three";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const TRACK_LENGTH = 8;           // scale factor for real direction vectors
-const TRACK_DURATION = 2;         // seconds for tracks to fully extend
-const FLASH_DURATION = 0.3;       // seconds for impact flash
-const BEAM_SPEED = 12;            // units per second
-const BEAM_START_X = 15;          // starting distance from center
+const TRACK_LENGTH = 8;
+const TRACK_DURATION = 2;
+const FLASH_DURATION = 0.3;
+const BEAM_SPEED = 12;
+const BEAM_START_X = 15;
 const API_URL = "http://localhost:8000";
+
+// ─── filter config ───────────────────────────────────────────────────────────
+
+type FilterType =
+  | "any" | "z_boson" | "jpsi"
+  | "upsilon_1s" | "upsilon_2s" | "upsilon_3s"
+  | "phi" | "rho_omega" | "high_mass" | "low_mass";
+
+const FILTERS: { value: FilterType; label: string; color: string }[] = [
+  { value: "any",        label: "ANY EVENT",               color: "#00d4ff" },
+  { value: "z_boson",    label: "Z BOSON (85-97 GeV)",     color: "#00d4ff" },
+  { value: "jpsi",       label: "J/\u03C8 MESON (2.9-3.3 GeV)",  color: "#ff006e" },
+  { value: "upsilon_1s", label: "\u03A5(1S) UPSILON (9.2-9.6)",  color: "#aaff00" },
+  { value: "upsilon_2s", label: "\u03A5(2S) UPSILON (9.9-10.1)", color: "#aaff00" },
+  { value: "upsilon_3s", label: "\u03A5(3S) UPSILON (10.3-10.4)",color: "#aaff00" },
+  { value: "phi",        label: "\u03C6 PHI MESON (0.99-1.05)",  color: "#ffffff" },
+  { value: "rho_omega",  label: "\u03C1/\u03C9 MESON (0.6-0.9)",       color: "#ffffff" },
+  { value: "high_mass",  label: "HIGH MASS (>100 GeV)",    color: "#ff006e" },
+  { value: "low_mass",   label: "LOW MASS (<2 GeV)",       color: "#ffffff" },
+];
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
 type CollisionStage = "idle" | "beams" | "impact" | "tracks" | "showing";
+
+interface CernParticle {
+  type: string;
+  charge: number;
+  color: string;
+  momentum: { px: number; py: number; pz: number };
+  energy: number;
+  eta: number;
+  phi: number;
+  pt: number;
+}
 
 interface CernEvent {
   event_id: string;
   invariant_mass: number;
   energy_tev: string;
   event_type: string;
-  particles: {
-    type: string;
-    charge: number;
-    color: string;
-    momentum: { px: number; py: number; pz: number };
-    energy: number;
-    eta: number;
-    phi: number;
-    pt: number;
-  }[];
+  resolved_type?: string;
+  particles: CernParticle[];
   track_directions: { x: number; y: number; z: number }[];
+}
+
+interface ParticleInfo {
+  name: string;
+  mass: string;
+  symbol: string;
+  what_is_it: string;
+  what_happened: string;
+  discovery: string;
+  nobel_prize: string;
+  experiment: string;
+  did_you_know: string;
+  color: string;
 }
 
 interface HudData {
@@ -46,6 +82,13 @@ interface HudData {
   particles: number | string;
   status: "connecting" | "ready" | "live";
 }
+
+type TrackData = {
+  dir: [number, number, number];
+  color: string;
+  particle?: CernParticle;       // real muon data (first 2 tracks)
+  particleSymbol?: string;       // from particle-info lookup
+};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -59,34 +102,55 @@ function randomDirection(): [number, number, number] {
   ];
 }
 
-async function fetchEvents(): Promise<CernEvent[]> {
-  const res = await fetch(`${API_URL}/events`);
+async function fetchEvents(filter: FilterType = "any"): Promise<CernEvent[]> {
+  const url = `${API_URL}/events/filter?event_type=${filter}&limit=10`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error("Failed to fetch events");
   return res.json();
+}
+
+async function fetchParticleInfo(): Promise<Record<string, ParticleInfo>> {
+  const res = await fetch(`${API_URL}/particle-info`);
+  if (!res.ok) throw new Error("Failed to fetch particle info");
+  return res.json();
+}
+
+// Map event_type strings from API to filter keys for particle-info lookup
+function eventTypeToFilterKey(eventType: string): string {
+  const map: Record<string, string> = {
+    "Z Boson Candidate": "z_boson",
+    "J/\u03C8 Meson": "jpsi",
+    "\u03A5(1S) Meson": "upsilon_1s",
+    "\u03A5(2S) Meson": "upsilon_2s",
+    "\u03A5(3S) Meson": "upsilon_3s",
+    "\u03C6 Meson": "phi",
+    "\u03C1/\u03C9 Meson": "rho_omega",
+    "High Mass Dimuon": "high_mass",
+    "Low Mass Dimuon": "low_mass",
+    "Dimuon Event": "any",
+  };
+  return map[eventType] ?? "any";
 }
 
 // ─── CMS-style detector ───────────────────────────────────────────────────────
 
 function CMSDetector() {
-  const groupRef = useRef<THREE.Group>(null);
-
-  useFrame((_, delta) => {
-    if (groupRef.current) groupRef.current.rotation.y += delta * 0.25;
-  });
-
   return (
-    <group ref={groupRef}>
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <cylinderGeometry args={[1.5, 1.5, 4, 48, 5, true]} />
-        <meshBasicMaterial color="#00ffcc" wireframe />
+    <group>
+      {/* Barrel aligned along X axis */}
+      <mesh rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[3, 3, 8, 48, 5, true]} />
+        <meshBasicMaterial color="#007766" wireframe />
       </mesh>
-      <mesh position={[0, 0, 2]}>
-        <circleGeometry args={[1.5, 48]} />
-        <meshBasicMaterial color="#00ffcc" wireframe side={THREE.DoubleSide} />
+      {/* Endcap +X */}
+      <mesh position={[4, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+        <circleGeometry args={[3, 48]} />
+        <meshBasicMaterial color="#007766" wireframe side={THREE.DoubleSide} />
       </mesh>
-      <mesh position={[0, 0, -2]}>
-        <circleGeometry args={[1.5, 48]} />
-        <meshBasicMaterial color="#00ffcc" wireframe side={THREE.DoubleSide} />
+      {/* Endcap -X */}
+      <mesh position={[-4, 0, 0]} rotation={[0, Math.PI / 2, 0]}>
+        <circleGeometry args={[3, 48]} />
+        <meshBasicMaterial color="#007766" wireframe side={THREE.DoubleSide} />
       </mesh>
     </group>
   );
@@ -94,13 +158,7 @@ function CMSDetector() {
 
 // ─── beam spheres ────────────────────────────────────────────────────────────
 
-function BeamSpheres({
-  stage,
-  onImpact,
-}: {
-  stage: CollisionStage;
-  onImpact: () => void;
-}) {
+function BeamSpheres({ stage, onImpact }: { stage: CollisionStage; onImpact: () => void }) {
   const group1 = useRef<THREE.Group>(null);
   const group2 = useRef<THREE.Group>(null);
   const x1 = useRef(-BEAM_START_X);
@@ -113,26 +171,21 @@ function BeamSpheres({
       x2.current = BEAM_START_X;
     }
     prevStage.current = stage;
-
     if (stage !== "beams") return;
 
     const speed1 = BEAM_SPEED * (1 + (BEAM_START_X - Math.abs(x1.current)) / BEAM_START_X * 2);
     x1.current += speed1 * delta;
     x2.current -= speed1 * delta;
-
     if (x1.current > 0) x1.current = 0;
     if (x2.current < 0) x2.current = 0;
 
     if (group1.current) group1.current.position.x = x1.current;
     if (group2.current) group2.current.position.x = x2.current;
 
-    if (Math.abs(x1.current) < 0.5 && Math.abs(x2.current) < 0.5) {
-      onImpact();
-    }
+    if (Math.abs(x1.current) < 0.5 && Math.abs(x2.current) < 0.5) onImpact();
   });
 
   if (stage !== "beams") return null;
-
   return (
     <>
       <group ref={group1} position={[-BEAM_START_X, 0, 0]}>
@@ -155,29 +208,18 @@ function BeamSpheres({
 
 // ─── collision flash ─────────────────────────────────────────────────────────
 
-function CollisionFlash({
-  stage,
-  onDone,
-}: {
-  stage: CollisionStage;
-  onDone: () => void;
-}) {
+function CollisionFlash({ stage, onDone }: { stage: CollisionStage; onDone: () => void }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const elapsed = useRef(0);
   const prevStage = useRef<CollisionStage>("idle");
 
   useFrame((_, delta) => {
-    if (stage === "impact" && prevStage.current !== "impact") {
-      elapsed.current = 0;
-    }
+    if (stage === "impact" && prevStage.current !== "impact") elapsed.current = 0;
     prevStage.current = stage;
-
-    if (stage !== "impact") return;
-    if (!meshRef.current) return;
+    if (stage !== "impact" || !meshRef.current) return;
 
     elapsed.current += delta;
     const t = elapsed.current / FLASH_DURATION;
-
     if (t < 1) {
       (meshRef.current.material as THREE.MeshBasicMaterial).opacity = 1 - t;
       meshRef.current.scale.setScalar(1 + t * 2);
@@ -187,7 +229,6 @@ function CollisionFlash({
   });
 
   if (stage !== "impact") return null;
-
   return (
     <mesh ref={meshRef}>
       <sphereGeometry args={[0.5, 24, 24]} />
@@ -196,11 +237,9 @@ function CollisionFlash({
   );
 }
 
-// ─── particle tracks ─────────────────────────────────────────────────────────
+// ─── particle tracks (no raycasting — hover handled in 2D) ─────────────────
 
-type TrackData = { dir: [number, number, number]; color: string };
-
-function Track({ dir, color }: TrackData) {
+function Track({ dir, color }: { dir: [number, number, number]; color: string }) {
   const lineRef = useRef<Line2>(null);
   const elapsed = useRef(0);
 
@@ -227,9 +266,7 @@ function Track({ dir, color }: TrackData) {
 }
 
 function ParticleTracks({
-  stage,
-  onDone,
-  trackData,
+  stage, onDone, trackData,
 }: {
   stage: CollisionStage;
   onDone: () => void;
@@ -245,9 +282,7 @@ function ParticleTracks({
       doneFired.current = false;
     }
     prevStage.current = stage;
-
     if (stage !== "tracks") return;
-
     elapsed.current += delta;
     if (elapsed.current >= TRACK_DURATION && !doneFired.current) {
       doneFired.current = true;
@@ -266,20 +301,24 @@ function ParticleTracks({
   );
 }
 
-// ─── build track data from a CERN event ─────────────────────────────────────
-// Uses real track_directions + particle colors, plus random filler tracks.
+// ─── build track data from CERN event ────────────────────────────────────────
 
-function buildTrackData(event: CernEvent): TrackData[] {
+function buildTrackData(event: CernEvent, pInfo?: Record<string, ParticleInfo>): TrackData[] {
   const tracks: TrackData[] = [];
+  const filterKey = event.resolved_type ?? eventTypeToFilterKey(event.event_type);
+  const sym = pInfo?.[filterKey]?.symbol ?? "";
 
-  // Real muon tracks from the event data
   for (let i = 0; i < event.track_directions.length; i++) {
     const d = event.track_directions[i];
-    const color = event.particles[i]?.color ?? "#ffffff";
-    tracks.push({ dir: [d.x, d.y, d.z], color });
+    const p = event.particles[i];
+    tracks.push({
+      dir: [d.x, d.y, d.z],
+      color: p?.color ?? "#ffffff",
+      particle: p,
+      particleSymbol: sym,
+    });
   }
 
-  // Fill remaining slots with random directions using particle colors
   const colors = event.particles.map((p) => p.color);
   while (tracks.length < 30) {
     tracks.push({
@@ -287,17 +326,21 @@ function buildTrackData(event: CernEvent): TrackData[] {
       color: colors[tracks.length % colors.length],
     });
   }
-
   return tracks;
+}
+
+// ─── expose camera to parent via ref ────────────────────────────────────────
+
+function CameraExposer({ cameraRef }: { cameraRef: React.MutableRefObject<THREE.Camera | null> }) {
+  const { camera } = useThree();
+  useEffect(() => { cameraRef.current = camera; }, [camera, cameraRef]);
+  return null;
 }
 
 // ─── collision controller ───────────────────────────────────────────────────
 
 function CollisionController({
-  stage,
-  setStage,
-  trackKey,
-  trackData,
+  stage, setStage, trackKey, trackData,
 }: {
   stage: CollisionStage;
   setStage: (s: CollisionStage) => void;
@@ -346,10 +389,21 @@ export default function Home() {
   const [stage, setStage] = useState<CollisionStage>("idle");
   const [trackKey, setTrackKey] = useState(0);
   const [trackData, setTrackData] = useState<TrackData[]>([]);
+  const [activeFilter, setActiveFilter] = useState<FilterType>("any");
+  const [filterLoading, setFilterLoading] = useState(false);
 
-  // Event buffer — stores 10 events, cycles through them
+  // Particle info from API
+  const particleInfoRef = useRef<Record<string, ParticleInfo>>({});
+  const [activeInfo, setActiveInfo] = useState<ParticleInfo | null>(null);
+  const [showInfoPanel, setShowInfoPanel] = useState(false);
+
+  // Tooltip for track hover
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; track: TrackData } | null>(null);
+
+  // Event buffer
   const eventsRef = useRef<CernEvent[]>([]);
   const indexRef = useRef(0);
+  const filterRef = useRef<FilterType>("any");
 
   const [hud, setHud] = useState<HudData>({
     energy: "-- TeV",
@@ -360,10 +414,11 @@ export default function Home() {
     status: "connecting",
   });
 
-  // Fetch 10 events from API
-  const loadEvents = useCallback(async () => {
+  // Fetch events
+  const loadEvents = useCallback(async (filter?: FilterType) => {
+    const f = filter ?? filterRef.current;
     try {
-      const data = await fetchEvents();
+      const data = await fetchEvents(f);
       eventsRef.current = data;
       indexRef.current = 0;
       setHud((prev) => ({
@@ -378,10 +433,32 @@ export default function Home() {
 
   // Fetch on mount
   useEffect(() => {
-    loadEvents();
+    loadEvents("any");
+    fetchParticleInfo()
+      .then((info) => { particleInfoRef.current = info; })
+      .catch((err) => console.error("Failed to fetch particle info:", err));
   }, [loadEvents]);
 
-  const canFire = (stage === "idle" || stage === "showing") && eventsRef.current.length > 0;
+  // Show info panel 0.5s after tracks appear
+  useEffect(() => {
+    if (stage === "showing" && activeInfo) {
+      const timer = setTimeout(() => setShowInfoPanel(true), 500);
+      return () => clearTimeout(timer);
+    }
+    if (stage === "beams") {
+      setShowInfoPanel(false);
+    }
+  }, [stage, activeInfo]);
+
+  const handleFilterChange = useCallback(async (filter: FilterType) => {
+    setActiveFilter(filter);
+    filterRef.current = filter;
+    setFilterLoading(true);
+    await loadEvents(filter);
+    setFilterLoading(false);
+  }, [loadEvents]);
+
+  const canFire = (stage === "idle" || stage === "showing") && eventsRef.current.length > 0 && !filterLoading;
 
   const handleFire = useCallback(() => {
     if (!canFire) return;
@@ -389,8 +466,9 @@ export default function Home() {
     const events = eventsRef.current;
     const idx = indexRef.current;
     const event = events[idx];
+    const filterKey = event.resolved_type ?? eventTypeToFilterKey(event.event_type);
+    const info = particleInfoRef.current[filterKey] ?? null;
 
-    // Update HUD with real event data
     setHud({
       energy: event.energy_tev,
       eventType: event.event_type,
@@ -400,23 +478,99 @@ export default function Home() {
       status: "live",
     });
 
-    // Build track data from real directions
-    setTrackData(buildTrackData(event));
+    setActiveInfo(info);
+    setShowInfoPanel(false);
+    setTooltip(null);
+    setTrackData(buildTrackData(event, particleInfoRef.current));
     setTrackKey((k) => k + 1);
     setStage("beams");
 
-    // Advance index — auto-refetch when we've used all 10
     const nextIdx = idx + 1;
     if (nextIdx >= events.length) {
-      loadEvents(); // Fetch fresh batch
+      loadEvents();
     } else {
       indexRef.current = nextIdx;
     }
   }, [canFire, loadEvents]);
 
+  // ─── 2D screen-space hover detection ─────────────────────────────────────
+  const cameraRef = useRef<THREE.Camera | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef(tooltip);
+  tooltipRef.current = tooltip;
+
+  // Helper: distance from point P to line segment AB in 2D
+  const pointToSegment2D = useCallback(
+    (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+      let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    },
+    [],
+  );
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if ((stage !== "tracks" && stage !== "showing") || trackData.length === 0) {
+        if (tooltipRef.current) setTooltip(null);
+        return;
+      }
+      const cam = cameraRef.current;
+      const el = canvasRef.current;
+      if (!cam || !el) return;
+
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX;
+      const my = e.clientY;
+      const w = rect.width;
+      const h = rect.height;
+
+      // Project 3D point to screen pixels
+      const project = (x: number, y: number, z: number) => {
+        const v = new THREE.Vector3(x, y, z).project(cam);
+        return {
+          sx: (v.x * 0.5 + 0.5) * w + rect.left,
+          sy: (-v.y * 0.5 + 0.5) * h + rect.top,
+        };
+      };
+
+      let bestDist = Infinity;
+      let bestIdx = -1;
+
+      for (let i = 0; i < trackData.length; i++) {
+        const d = trackData[i].dir;
+        const a = project(0, 0, 0);
+        const b = project(d[0] * TRACK_LENGTH, d[1] * TRACK_LENGTH, d[2] * TRACK_LENGTH);
+        const dist = pointToSegment2D(mx, my, a.sx, a.sy, b.sx, b.sy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = i;
+        }
+      }
+
+      if (bestDist < 15 && bestIdx >= 0) {
+        const track = trackData[bestIdx];
+        setTooltip({ x: mx, y: my, track });
+      } else {
+        setTooltip(null);
+      }
+    },
+    [stage, trackData, pointToSegment2D],
+  );
+
   return (
-    <div style={{ width: "100vw", height: "100vh", background: "#000", position: "relative" }}>
-      <Canvas gl={{ antialias: false }} camera={{ position: [0, 0, 7], fov: 60 }}>
+    <div
+      ref={canvasRef}
+      style={{ width: "100vw", height: "100vh", background: "#000", position: "relative" }}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => setTooltip(null)}
+    >
+      <Canvas gl={{ antialias: false }} camera={{ position: [0, 4, 14], fov: 60 }}>
+        <CameraExposer cameraRef={cameraRef} />
         <ambientLight intensity={0.4} />
         <pointLight position={[5, 5, 5]} intensity={60} color="#ffffff" />
 
@@ -431,17 +585,15 @@ export default function Home() {
         <OrbitControls enablePan={false} />
 
         <EffectComposer>
-          <Bloom
-            intensity={2.5}
-            luminanceThreshold={0.1}
-            luminanceSmoothing={0.9}
-            mipmapBlur
-          />
+          <Bloom intensity={1.2} luminanceThreshold={0.4} luminanceSmoothing={0.9} mipmapBlur />
         </EffectComposer>
       </Canvas>
 
-      {/* ── pulsing dot keyframe ── */}
-      <style>{`@keyframes hud-pulse{0%,100%{opacity:.35;box-shadow:0 0 4px #0f0}50%{opacity:1;box-shadow:0 0 10px #0f0}}`}</style>
+      {/* ── CSS animations ── */}
+      <style>{`
+        @keyframes hud-pulse{0%,100%{opacity:.35;box-shadow:0 0 4px #0f0}50%{opacity:1;box-shadow:0 0 10px #0f0}}
+        @keyframes slide-in-right{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+      `}</style>
 
       {/* ── HUD: top-left title ── */}
       <div style={{ ...HUD_PANEL, top: "1.25rem", left: "1.25rem" }}>
@@ -451,6 +603,64 @@ export default function Home() {
         <div style={{ color: "rgba(0,255,204,0.55)", fontSize: "0.6rem" }}>
           CMS Detector — Run 3
         </div>
+      </div>
+
+      {/* ── HUD: left filter panel ── */}
+      <div
+        style={{
+          ...HUD_PANEL,
+          top: "5.5rem",
+          left: "1.25rem",
+          pointerEvents: "auto",
+          cursor: "default",
+          maxHeight: "calc(100vh - 12rem)",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ marginBottom: "0.35rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
+          EVENT FILTER
+        </div>
+        {filterLoading && (
+          <div style={{ color: "#ffcc00", marginBottom: "0.25rem", fontSize: "0.6rem" }}>LOADING...</div>
+        )}
+        {FILTERS.map((f) => (
+          <label
+            key={f.value}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              cursor: "pointer",
+              padding: "0.1rem 0",
+              color: activeFilter === f.value ? "#00ffcc" : "#778",
+              fontSize: "0.6rem",
+              transition: "color 0.15s",
+            }}
+          >
+            <span
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                border: `1.5px solid ${activeFilter === f.value ? f.color : "#445"}`,
+                background: activeFilter === f.value ? f.color : "transparent",
+                display: "inline-block",
+                flexShrink: 0,
+                boxShadow: activeFilter === f.value ? `0 0 6px ${f.color}80` : "none",
+                transition: "all 0.15s",
+              }}
+            />
+            <input
+              type="radio"
+              name="event-filter"
+              value={f.value}
+              checked={activeFilter === f.value}
+              onChange={() => handleFilterChange(f.value)}
+              style={{ display: "none" }}
+            />
+            {f.label}
+          </label>
+        ))}
       </div>
 
       {/* ── HUD: top-right event stats ── */}
@@ -471,13 +681,146 @@ export default function Home() {
         )}
       </div>
 
+      {/* ── HUD: physics explanation panel (slides in from right) ── */}
+      {showInfoPanel && activeInfo && (
+        <div
+          style={{
+            ...HUD_PANEL,
+            top: "12rem",
+            right: "1.25rem",
+            maxWidth: "320px",
+            maxHeight: "calc(100vh - 18rem)",
+            overflowY: "auto",
+            pointerEvents: "auto",
+            animation: "slide-in-right 0.4s ease-out",
+            lineHeight: 1.5,
+            textTransform: "none",
+            letterSpacing: "0.04em",
+          }}
+        >
+          {/* Close button */}
+          <button
+            onClick={() => setShowInfoPanel(false)}
+            style={{
+              position: "absolute",
+              top: "0.4rem",
+              right: "0.5rem",
+              background: "none",
+              border: "none",
+              color: "#556",
+              cursor: "pointer",
+              fontFamily: "monospace",
+              fontSize: "0.85rem",
+              padding: "0.15rem 0.3rem",
+              lineHeight: 1,
+            }}
+          >
+            ✕
+          </button>
+
+          <div style={{ fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: "0.2rem" }}>
+            PARTICLE ANALYSIS
+          </div>
+          <div style={{ borderBottom: "1px solid rgba(0,255,204,0.2)", marginBottom: "0.5rem" }} />
+
+          <div style={{ fontSize: "0.95rem", fontWeight: "bold", color: activeInfo.color, marginBottom: "0.1rem" }}>
+            {activeInfo.symbol} {activeInfo.name}
+          </div>
+          <div style={{ color: "#aaa", fontSize: "0.65rem", marginBottom: "0.6rem" }}>
+            Mass: {activeInfo.mass}
+          </div>
+
+          <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
+            WHAT HAPPENED
+          </div>
+          <div style={{ color: "#ccc", fontSize: "0.62rem", marginBottom: "0.5rem" }}>
+            {activeInfo.what_happened}
+          </div>
+
+          <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
+            DISCOVERY
+          </div>
+          <div style={{ color: "#ccc", fontSize: "0.62rem", marginBottom: "0.15rem" }}>
+            {activeInfo.discovery}
+          </div>
+          {activeInfo.nobel_prize && (
+            <div style={{ color: "#ffcc00", fontSize: "0.58rem", marginBottom: "0.5rem" }}>
+              🏅 {activeInfo.nobel_prize}
+            </div>
+          )}
+
+          <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
+            THIS EXPERIMENT
+          </div>
+          <div style={{ color: "#ccc", fontSize: "0.62rem", marginBottom: "0.5rem" }}>
+            {activeInfo.experiment}
+          </div>
+
+          <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
+            DID YOU KNOW
+          </div>
+          <div style={{ color: "#ccc", fontSize: "0.62rem" }}>
+            {activeInfo.did_you_know}
+          </div>
+        </div>
+      )}
+
+      {/* ── Track tooltip ── */}
+      {tooltip && (
+        <div
+          style={{
+            position: "fixed",
+            left: tooltip.x + 14,
+            top: tooltip.y - 10,
+            background: "rgba(0,0,0,0.9)",
+            border: "1px solid rgba(0,255,204,0.4)",
+            borderRadius: "2px",
+            padding: "0.4rem 0.6rem",
+            fontFamily: "monospace",
+            fontSize: "0.58rem",
+            color: "#00ffcc",
+            pointerEvents: "none",
+            zIndex: 100,
+            whiteSpace: "nowrap",
+            lineHeight: 1.6,
+          }}
+        >
+          {tooltip.track.particle ? (
+            <>
+              <div style={{ fontWeight: "bold", color: tooltip.track.color }}>
+                {tooltip.track.particleSymbol ?? ""} {tooltip.track.particle.type} ({tooltip.track.particle.charge > 0 ? "+" : ""}{tooltip.track.particle.charge})
+              </div>
+              <div><span style={{ color: "#aaa" }}>Energy:</span> {tooltip.track.particle.energy.toFixed(2)} GeV</div>
+              <div><span style={{ color: "#aaa" }}>pT:</span> {tooltip.track.particle.pt.toFixed(2)} GeV/c</div>
+              <div><span style={{ color: "#aaa" }}>η:</span> {tooltip.track.particle.eta.toFixed(3)}</div>
+              <div><span style={{ color: "#aaa" }}>φ:</span> {tooltip.track.particle.phi.toFixed(3)} rad</div>
+            </>
+          ) : (
+            <div style={{ color: tooltip.track.color }}>Secondary particle track</div>
+          )}
+        </div>
+      )}
+
+      {/* ── HUD: bottom-left particle legend ── */}
+      <div style={{ ...HUD_PANEL, bottom: "4rem", left: "1.25rem", maxWidth: "200px" }}>
+        <div style={{ marginBottom: "0.2rem", fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)" }}>
+          PARTICLE LEGEND
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.6rem" }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#00d4ff", display: "inline-block", flexShrink: 0 }} />
+          <span>μ⁺ &nbsp;Positive Muon</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.6rem" }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ff006e", display: "inline-block", flexShrink: 0 }} />
+          <span>μ⁻ &nbsp;Negative Muon</span>
+        </div>
+      </div>
+
       {/* ── HUD: bottom-left data source ── */}
       <div style={{ ...HUD_PANEL, bottom: "1.25rem", left: "1.25rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
         <span
           style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
+            width: 6, height: 6, borderRadius: "50%",
             background: hud.status === "connecting" ? "#ffcc00" : "#0f0",
             display: "inline-block",
             animation: "hud-pulse 1.8s ease-in-out infinite",
@@ -509,8 +852,7 @@ export default function Home() {
           textTransform: "uppercase",
           cursor: canFire ? "pointer" : "not-allowed",
           opacity: canFire ? 1 : 0.4,
-          boxShadow:
-            "0 0 16px rgba(0,255,204,0.35), inset 0 0 12px rgba(0,255,204,0.06)",
+          boxShadow: "0 0 16px rgba(0,255,204,0.35), inset 0 0 12px rgba(0,255,204,0.06)",
           transition: "box-shadow 0.15s ease, opacity 0.15s ease",
         }}
         onMouseEnter={(e) =>
