@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # ─── CSV loading & pre-processing ──────────────────────────────────────────────
 
@@ -338,3 +339,172 @@ _PARTICLE_INFO: dict[str, dict] = {
 def get_particle_info():
     """Return physics explanations for each particle type."""
     return _PARTICLE_INFO
+
+
+# ─── custom collision prediction ───────────────────────────────────────────────
+
+_BEAM_MASSES: dict[str, float] = {
+    "proton": 0.938,
+    "antiproton": 0.938,
+    "electron": 0.000511,
+    "positron": 0.000511,
+    "muon": 0.1057,
+    "antimuon": 0.1057,
+}
+
+_DECAY_MASSES: dict[str, float] = {
+    "z_boson": 91.188,
+    "higgs": 125.25,
+    "w_boson": 80.377,
+    "top_quark": 172.69,
+    "jpsi": 3.097,
+    "upsilon": 9.460,
+}
+
+_DECAY_EVENT_TYPES: dict[str, str] = {
+    "z_boson": "Z Boson Candidate",
+    "higgs": "Higgs Boson Candidate",
+    "w_boson": "W Boson Candidate",
+    "top_quark": "Top Quark Pair",
+    "jpsi": "J/\u03c8 Meson",
+    "upsilon": "\u03a5(1S) Meson",
+}
+
+# Products: list of (type, charge, color) for each daughter
+_DECAY_PRODUCTS: dict[str, list[tuple[str, int | float, str]]] = {
+    "z_boson":   [("muon",    +1, "#00d4ff"), ("muon",    -1, "#ff006e")],
+    "higgs":     [("photon",   0, "#ffffff"), ("photon",   0, "#ffff00")],
+    "w_boson":   [("muon",    -1, "#ff006e"), ("neutrino", 0, "#aaaaaa")],
+    "top_quark": [("jet",   2/3, "#ff6600"), ("jet",   -1/3, "#ff9900")],
+    "jpsi":      [("muon",    +1, "#00d4ff"), ("muon",    -1, "#ff006e")],
+    "upsilon":   [("muon",    +1, "#00d4ff"), ("muon",    -1, "#ff006e")],
+}
+
+
+def _generate_custom_event(
+    beam1: str,
+    beam2: str,
+    energy_tev: float,
+    decay_channel: str,
+) -> dict:
+    """Generate a physically–realistic synthetic collision event."""
+    import time
+
+    # Resolve 'any' to a random specific channel
+    if decay_channel == "any":
+        decay_channel = random.choice(list(_DECAY_MASSES.keys()))
+
+    target_mass = _DECAY_MASSES[decay_channel]
+    # Gaussian smearing: σ = 2 % of nominal mass
+    inv_mass = max(0.1, random.gauss(target_mass, target_mass * 0.02))
+    half_energy = inv_mass / 2.0
+
+    products = _DECAY_PRODUCTS[decay_channel]
+    particles = []
+    track_dirs = []
+
+    for ptype, charge, color in products:
+        # Angular distribution depends on channel
+        if decay_channel in ("z_boson", "higgs", "w_boson"):
+            cos_theta = random.uniform(-0.9, 0.9)
+        elif decay_channel == "top_quark":
+            cos_theta = random.uniform(-1.0, 1.0)
+        else:  # jpsi, upsilon – central
+            eta = random.uniform(-2.4, 2.4)
+            cos_theta = math.tanh(eta)
+
+        sin_theta = math.sqrt(1.0 - cos_theta * cos_theta)
+        phi = random.uniform(-math.pi, math.pi)
+
+        p = math.sqrt(max(0, half_energy * half_energy))  # magnitude
+        pt_val = p * sin_theta
+        px_val = pt_val * math.cos(phi)
+        py_val = pt_val * math.sin(phi)
+        pz_val = p * cos_theta
+
+        # Compute eta from cos_theta for the particle record
+        theta_angle = math.acos(max(-1, min(1, cos_theta)))
+        eta_val = -math.log(max(1e-10, math.tan(theta_angle / 2.0)))
+
+        norm = math.sqrt(px_val**2 + py_val**2 + pz_val**2) or 1.0
+
+        particles.append({
+            "type": ptype,
+            "charge": charge,
+            "color": color,
+            "momentum": {
+                "px": round(px_val, 4),
+                "py": round(py_val, 4),
+                "pz": round(pz_val, 4),
+            },
+            "energy": round(half_energy, 4),
+            "eta": round(eta_val, 4),
+            "phi": round(phi, 4),
+            "pt": round(pt_val, 4),
+        })
+
+        track_dirs.append({
+            "x": round(px_val / norm, 4),
+            "y": round(py_val / norm, 4),
+            "z": round(pz_val / norm, 4),
+        })
+
+    return {
+        "event_id": f"CUSTOM-{int(time.time() * 1000)}",
+        "invariant_mass": round(inv_mass, 3),
+        "energy_tev": f"{energy_tev} TeV",
+        "event_type": _DECAY_EVENT_TYPES.get(decay_channel, "Custom Event"),
+        "resolved_type": decay_channel,
+        "is_custom": True,
+        "beam1": beam1,
+        "beam2": beam2,
+        "particles": particles,
+        "track_directions": track_dirs,
+    }
+
+
+class CustomCollisionRequest(BaseModel):
+    beam1: str = "proton"
+    beam2: str = "proton"
+    energy_tev: float = 13.6
+    decay_channel: str = "any"
+
+
+@app.post("/collision/custom")
+def create_custom_collision(req: CustomCollisionRequest):
+    """Generate a synthetic collision event with realistic kinematics."""
+    if req.beam1 not in _BEAM_MASSES:
+        raise HTTPException(400, f"Unknown beam1 '{req.beam1}'. Use: {', '.join(_BEAM_MASSES)}")
+    if req.beam2 not in _BEAM_MASSES:
+        raise HTTPException(400, f"Unknown beam2 '{req.beam2}'. Use: {', '.join(_BEAM_MASSES)}")
+    valid_channels = list(_DECAY_MASSES.keys()) + ["any"]
+    if req.decay_channel not in valid_channels:
+        raise HTTPException(400, f"Unknown decay_channel '{req.decay_channel}'. Use: {', '.join(valid_channels)}")
+    if req.energy_tev <= 0:
+        raise HTTPException(400, "energy_tev must be positive")
+
+    return _generate_custom_event(req.beam1, req.beam2, req.energy_tev, req.decay_channel)
+
+
+@app.get("/collision/options")
+def get_collision_options():
+    """Return available beam types and decay channels."""
+    return {
+        "beams": [
+            {"id": "proton",     "label": "Proton",     "symbol": "p",  "mass_gev": 0.938},
+            {"id": "antiproton", "label": "Antiproton", "symbol": "p\u0304", "mass_gev": 0.938},
+            {"id": "electron",   "label": "Electron",   "symbol": "e\u207b", "mass_gev": 0.000511},
+            {"id": "positron",   "label": "Positron",   "symbol": "e\u207a", "mass_gev": 0.000511},
+            {"id": "muon",       "label": "Muon",       "symbol": "\u03bc\u207b", "mass_gev": 0.1057},
+            {"id": "antimuon",   "label": "Antimuon",   "symbol": "\u03bc\u207a", "mass_gev": 0.1057},
+        ],
+        "decay_channels": [
+            {"id": "any",        "label": "Any",              "description": "Random decay channel"},
+            {"id": "z_boson",    "label": "Z Boson",          "symbol": "Z\u2070",  "mass_gev": 91.188},
+            {"id": "higgs",      "label": "Higgs Boson",      "symbol": "H\u2070",  "mass_gev": 125.25},
+            {"id": "w_boson",    "label": "W Boson",          "symbol": "W\u00b1",  "mass_gev": 80.377},
+            {"id": "top_quark",  "label": "Top Quark Pair",   "symbol": "tt\u0304", "mass_gev": 172.69},
+            {"id": "jpsi",       "label": "J/\u03c8 Meson",   "symbol": "J/\u03c8", "mass_gev": 3.097},
+            {"id": "upsilon",    "label": "\u03a5 Meson",     "symbol": "\u03a5",   "mass_gev": 9.460},
+        ],
+    }

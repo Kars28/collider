@@ -57,9 +57,27 @@ interface CernEvent {
   energy_tev: string;
   event_type: string;
   resolved_type?: string;
+  is_custom?: boolean;
   particles: CernParticle[];
   track_directions: { x: number; y: number; z: number }[];
 }
+
+interface BeamOption {
+  id: string;
+  label: string;
+  symbol: string;
+  mass_gev: number;
+}
+
+interface DecayOption {
+  id: string;
+  label: string;
+  symbol?: string;
+  description?: string;
+  mass_gev?: number;
+}
+
+type SceneMode = "real" | "custom";
 
 interface ParticleInfo {
   name: string;
@@ -81,6 +99,7 @@ interface HudData {
   eventId: string;
   particles: number | string;
   status: "connecting" | "ready" | "live";
+  isCustom?: boolean;
 }
 
 type TrackData = {
@@ -112,6 +131,24 @@ async function fetchEvents(filter: FilterType = "any"): Promise<CernEvent[]> {
 async function fetchParticleInfo(): Promise<Record<string, ParticleInfo>> {
   const res = await fetch(`${API_URL}/particle-info`);
   if (!res.ok) throw new Error("Failed to fetch particle info");
+  return res.json();
+}
+
+async function fetchCollisionOptions(): Promise<{ beams: BeamOption[]; decay_channels: DecayOption[] }> {
+  const res = await fetch(`${API_URL}/collision/options`);
+  if (!res.ok) throw new Error("Failed to fetch collision options");
+  return res.json();
+}
+
+async function fetchCustomCollision(body: {
+  beam1: string; beam2: string; energy_tev: number; decay_channel: string;
+}): Promise<CernEvent> {
+  const res = await fetch(`${API_URL}/collision/custom`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error("Failed to generate custom collision");
   return res.json();
 }
 
@@ -405,6 +442,16 @@ export default function Home() {
   const indexRef = useRef(0);
   const filterRef = useRef<FilterType>("any");
 
+  // ─── custom collision mode ───────────────────────────────────────────────
+  const [sceneMode, setSceneMode] = useState<SceneMode>("real");
+  const [beamOptions, setBeamOptions] = useState<BeamOption[]>([]);
+  const [decayOptions, setDecayOptions] = useState<DecayOption[]>([]);
+  const [customBeam1, setCustomBeam1] = useState("proton");
+  const [customBeam2, setCustomBeam2] = useState("proton");
+  const [customEnergy, setCustomEnergy] = useState(13.6);
+  const [customDecay, setCustomDecay] = useState("any");
+  const [customLoading, setCustomLoading] = useState(false);
+
   const [hud, setHud] = useState<HudData>({
     energy: "-- TeV",
     eventType: "CONNECTING TO CERN DATA...",
@@ -437,6 +484,12 @@ export default function Home() {
     fetchParticleInfo()
       .then((info) => { particleInfoRef.current = info; })
       .catch((err) => console.error("Failed to fetch particle info:", err));
+    fetchCollisionOptions()
+      .then((opts) => {
+        setBeamOptions(opts.beams);
+        setDecayOptions(opts.decay_channels);
+      })
+      .catch((err) => console.error("Failed to fetch collision options:", err));
   }, [loadEvents]);
 
   // Show info panel 0.5s after tracks appear
@@ -458,10 +511,12 @@ export default function Home() {
     setFilterLoading(false);
   }, [loadEvents]);
 
-  const canFire = (stage === "idle" || stage === "showing") && eventsRef.current.length > 0 && !filterLoading;
+  const canFire = (stage === "idle" || stage === "showing") && !filterLoading && !customLoading;
+  const canFireReal = canFire && eventsRef.current.length > 0;
 
-  const handleFire = useCallback(() => {
-    if (!canFire) return;
+  // Fire using real data
+  const handleFireReal = useCallback(() => {
+    if (!canFireReal) return;
 
     const events = eventsRef.current;
     const idx = indexRef.current;
@@ -476,6 +531,7 @@ export default function Home() {
       eventId: event.event_id,
       particles: 2,
       status: "live",
+      isCustom: false,
     });
 
     setActiveInfo(info);
@@ -491,7 +547,53 @@ export default function Home() {
     } else {
       indexRef.current = nextIdx;
     }
-  }, [canFire, loadEvents]);
+  }, [canFireReal, loadEvents]);
+
+  // Fire using custom collision
+  const handleFireCustom = useCallback(async () => {
+    if (!canFire) return;
+    setCustomLoading(true);
+    try {
+      const event = await fetchCustomCollision({
+        beam1: customBeam1,
+        beam2: customBeam2,
+        energy_tev: customEnergy,
+        decay_channel: customDecay,
+      });
+      const filterKey = event.resolved_type ?? "any";
+      const info = particleInfoRef.current[filterKey] ?? null;
+
+      setHud({
+        energy: event.energy_tev,
+        eventType: event.event_type,
+        invariantMass: event.invariant_mass.toFixed(3) + " GeV",
+        eventId: event.event_id,
+        particles: event.particles.length,
+        status: "live",
+        isCustom: true,
+      });
+
+      setActiveInfo(info);
+      setShowInfoPanel(false);
+      setTooltip(null);
+      setTrackData(buildTrackData(event, particleInfoRef.current));
+      setTrackKey((k) => k + 1);
+      setStage("beams");
+    } catch (err) {
+      console.error("Custom collision failed:", err);
+    } finally {
+      setCustomLoading(false);
+    }
+  }, [canFire, customBeam1, customBeam2, customEnergy, customDecay]);
+
+  // Unified fire handler
+  const handleFire = useCallback(() => {
+    if (sceneMode === "custom") {
+      handleFireCustom();
+    } else {
+      handleFireReal();
+    }
+  }, [sceneMode, handleFireCustom, handleFireReal]);
 
   // ─── 2D screen-space hover detection ─────────────────────────────────────
   const cameraRef = useRef<THREE.Camera | null>(null);
@@ -593,6 +695,10 @@ export default function Home() {
       <style>{`
         @keyframes hud-pulse{0%,100%{opacity:.35;box-shadow:0 0 4px #0f0}50%{opacity:1;box-shadow:0 0 10px #0f0}}
         @keyframes slide-in-right{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
+        input[type=range]{-webkit-appearance:none;appearance:none;background:rgba(0,255,204,0.15);height:4px;border-radius:2px;outline:none;}
+        input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#00ffcc;cursor:pointer;box-shadow:0 0 8px rgba(0,255,204,0.5);}
+        select.cyber-select{-webkit-appearance:none;appearance:none;background:rgba(0,0,0,0.6);color:#00ffcc;border:1px solid rgba(0,255,204,0.3);border-radius:2px;padding:0.3rem 0.5rem;font-family:monospace;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;width:100%;outline:none;}
+        select.cyber-select:focus{border-color:#00ffcc;}
       `}</style>
 
       {/* ── HUD: top-left title ── */}
@@ -605,7 +711,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ── HUD: left filter panel ── */}
+      {/* ── HUD: left panel with mode tabs ── */}
       <div
         style={{
           ...HUD_PANEL,
@@ -615,58 +721,206 @@ export default function Home() {
           cursor: "default",
           maxHeight: "calc(100vh - 12rem)",
           overflowY: "auto",
+          minWidth: "210px",
         }}
       >
-        <div style={{ marginBottom: "0.35rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
-          EVENT FILTER
-        </div>
-        {filterLoading && (
-          <div style={{ color: "#ffcc00", marginBottom: "0.25rem", fontSize: "0.6rem" }}>LOADING...</div>
-        )}
-        {FILTERS.map((f) => (
-          <label
-            key={f.value}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.4rem",
-              cursor: "pointer",
-              padding: "0.1rem 0",
-              color: activeFilter === f.value ? "#00ffcc" : "#778",
-              fontSize: "0.6rem",
-              transition: "color 0.15s",
-            }}
-          >
-            <span
+        {/* Mode tabs */}
+        <div style={{ display: "flex", gap: "0", marginBottom: "0.5rem", borderBottom: "1px solid rgba(0,255,204,0.2)" }}>
+          {(["real", "custom"] as SceneMode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => setSceneMode(m)}
               style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                border: `1.5px solid ${activeFilter === f.value ? f.color : "#445"}`,
-                background: activeFilter === f.value ? f.color : "transparent",
-                display: "inline-block",
-                flexShrink: 0,
-                boxShadow: activeFilter === f.value ? `0 0 6px ${f.color}80` : "none",
+                flex: 1,
+                background: sceneMode === m ? "rgba(0,255,204,0.12)" : "transparent",
+                color: sceneMode === m ? "#00ffcc" : "#556",
+                border: "none",
+                borderBottom: sceneMode === m ? "2px solid #00ffcc" : "2px solid transparent",
+                fontFamily: "monospace",
+                fontSize: "0.58rem",
+                fontWeight: "bold",
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                padding: "0.35rem 0.3rem",
+                cursor: "pointer",
                 transition: "all 0.15s",
               }}
-            />
-            <input
-              type="radio"
-              name="event-filter"
-              value={f.value}
-              checked={activeFilter === f.value}
-              onChange={() => handleFilterChange(f.value)}
-              style={{ display: "none" }}
-            />
-            {f.label}
-          </label>
-        ))}
+            >
+              {m === "real" ? "REAL DATA" : "CUSTOM"}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Real data mode: filters ── */}
+        {sceneMode === "real" && (
+          <>
+            <div style={{ marginBottom: "0.35rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
+              EVENT FILTER
+            </div>
+            {filterLoading && (
+              <div style={{ color: "#ffcc00", marginBottom: "0.25rem", fontSize: "0.6rem" }}>LOADING...</div>
+            )}
+            {FILTERS.map((f) => (
+              <label
+                key={f.value}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                  cursor: "pointer",
+                  padding: "0.1rem 0",
+                  color: activeFilter === f.value ? "#00ffcc" : "#778",
+                  fontSize: "0.6rem",
+                  transition: "color 0.15s",
+                }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    border: `1.5px solid ${activeFilter === f.value ? f.color : "#445"}`,
+                    background: activeFilter === f.value ? f.color : "transparent",
+                    display: "inline-block",
+                    flexShrink: 0,
+                    boxShadow: activeFilter === f.value ? `0 0 6px ${f.color}80` : "none",
+                    transition: "all 0.15s",
+                  }}
+                />
+                <input
+                  type="radio"
+                  name="event-filter"
+                  value={f.value}
+                  checked={activeFilter === f.value}
+                  onChange={() => handleFilterChange(f.value)}
+                  style={{ display: "none" }}
+                />
+                {f.label}
+              </label>
+            ))}
+          </>
+        )}
+
+        {/* ── Custom mode: collision builder ── */}
+        {sceneMode === "custom" && (
+          <>
+            <div style={{ marginBottom: "0.35rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
+              CUSTOM COLLISION BUILDER
+            </div>
+            <div style={{ borderTop: "1px solid rgba(0,255,204,0.15)", paddingTop: "0.4rem" }}>
+              {/* Beam selectors */}
+              <div style={{ display: "flex", gap: "0.4rem", marginBottom: "0.5rem" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "0.5rem", color: "#667", marginBottom: "0.15rem" }}>BEAM 1</div>
+                  <select
+                    className="cyber-select"
+                    value={customBeam1}
+                    onChange={(e) => setCustomBeam1(e.target.value)}
+                  >
+                    {beamOptions.map((b) => (
+                      <option key={b.id} value={b.id}>{b.symbol} {b.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: "0.5rem", color: "#667", marginBottom: "0.15rem" }}>BEAM 2</div>
+                  <select
+                    className="cyber-select"
+                    value={customBeam2}
+                    onChange={(e) => setCustomBeam2(e.target.value)}
+                  >
+                    {beamOptions.map((b) => (
+                      <option key={b.id} value={b.id}>{b.symbol} {b.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Energy slider */}
+              <div style={{ marginBottom: "0.5rem" }}>
+                <div style={{ fontSize: "0.5rem", color: "#667", marginBottom: "0.15rem" }}>ENERGY</div>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                  <input
+                    type="range"
+                    min={1}
+                    max={14}
+                    step={0.1}
+                    value={customEnergy}
+                    onChange={(e) => setCustomEnergy(parseFloat(e.target.value))}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={{ fontSize: "0.6rem", color: "#00ffcc", minWidth: "50px", textAlign: "right" }}>
+                    {customEnergy.toFixed(1)} TeV
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.45rem", color: "#445", marginTop: "0.1rem" }}>
+                  <span>1 TeV</span>
+                  <span>14 TeV</span>
+                </div>
+              </div>
+
+              {/* Decay channel */}
+              <div style={{ marginBottom: "0.6rem" }}>
+                <div style={{ fontSize: "0.5rem", color: "#667", marginBottom: "0.15rem" }}>DECAY CHANNEL</div>
+                <select
+                  className="cyber-select"
+                  value={customDecay}
+                  onChange={(e) => setCustomDecay(e.target.value)}
+                >
+                  {decayOptions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.symbol ? `${d.symbol} ` : ""}{d.label}{d.mass_gev ? ` (${d.mass_gev} GeV)` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Generate button */}
+              <button
+                onClick={handleFireCustom}
+                disabled={!canFire || customLoading}
+                style={{
+                  width: "100%",
+                  background: "rgba(0, 255, 204, 0.08)",
+                  color: "#00ffcc",
+                  border: "1px solid rgba(0,255,204,0.4)",
+                  borderRadius: "2px",
+                  padding: "0.45rem 0.5rem",
+                  fontSize: "0.6rem",
+                  fontFamily: "monospace",
+                  fontWeight: "bold",
+                  letterSpacing: "0.12em",
+                  textTransform: "uppercase",
+                  cursor: canFire && !customLoading ? "pointer" : "not-allowed",
+                  opacity: canFire && !customLoading ? 1 : 0.4,
+                  transition: "all 0.15s",
+                }}
+              >
+                {customLoading ? "GENERATING..." : "⚡ GENERATE COLLISION"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* ── HUD: top-right event stats ── */}
       <div style={{ ...HUD_PANEL, top: "1.25rem", right: "1.25rem", minWidth: "240px" }}>
-        <div style={{ marginBottom: "0.3rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
-          EVENT DATA
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.3rem" }}>
+          <span style={{ fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>EVENT DATA</span>
+          {hud.isCustom && (
+            <span style={{
+              background: "rgba(0,255,204,0.12)",
+              border: "1px solid rgba(0,255,204,0.3)",
+              borderRadius: "2px",
+              padding: "0.05rem 0.35rem",
+              fontSize: "0.45rem",
+              fontWeight: "bold",
+              color: "#00ffcc",
+              letterSpacing: "0.08em",
+            }}>
+              ⚡ AI PREDICTED
+            </span>
+          )}
         </div>
         {hud.status === "connecting" ? (
           <div style={{ color: "#ffcc00" }}>{hud.eventType}</div>
@@ -835,6 +1089,7 @@ export default function Home() {
       {/* ── FIRE COLLISION button ── */}
       <button
         onClick={handleFire}
+        disabled={sceneMode === "real" ? !canFireReal : (!canFire || customLoading)}
         style={{
           position: "absolute",
           bottom: "2rem",
@@ -850,8 +1105,8 @@ export default function Home() {
           fontWeight: "bold",
           letterSpacing: "0.25em",
           textTransform: "uppercase",
-          cursor: canFire ? "pointer" : "not-allowed",
-          opacity: canFire ? 1 : 0.4,
+          cursor: (sceneMode === "real" ? canFireReal : (canFire && !customLoading)) ? "pointer" : "not-allowed",
+          opacity: (sceneMode === "real" ? canFireReal : (canFire && !customLoading)) ? 1 : 0.4,
           boxShadow: "0 0 16px rgba(0,255,204,0.35), inset 0 0 12px rgba(0,255,204,0.06)",
           transition: "box-shadow 0.15s ease, opacity 0.15s ease",
         }}
@@ -864,7 +1119,7 @@ export default function Home() {
             "0 0 16px rgba(0,255,204,0.35), inset 0 0 12px rgba(0,255,204,0.06)")
         }
       >
-        ⬡ Fire Collision
+        {sceneMode === "custom" ? "⚡ Fire Custom Collision" : "⬡ Fire Collision"}
       </button>
     </div>
   );
