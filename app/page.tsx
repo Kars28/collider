@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { Line, OrbitControls } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
@@ -9,30 +9,43 @@ import * as THREE from "three";
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-const COLORS = ["#00d4ff", "#ff006e", "#aaff00", "#ffffff"] as const;
-const TRACK_COUNT = 30;
-const TRACK_LENGTH = 6;
-const TRACK_DURATION = 2;       // seconds for tracks to fully extend
-const FLASH_DURATION = 0.3;     // seconds for impact flash
-const BEAM_SPEED = 12;          // units per second — spheres accelerate toward center
-const BEAM_START_X = 15;        // starting distance from center
-
-// HUD data pools
-const ENERGIES   = ["7.0 TeV", "8.0 TeV", "13.0 TeV", "13.6 TeV"] as const;
-const EVENT_TYPES = ["pp → H + X", "pp → tt\u0304", "pp → W± + jets", "pp → Z⁰ + X"] as const;
-
-function randomEventStats() {
-  return {
-    energy:    ENERGIES[Math.floor(Math.random() * ENERGIES.length)],
-    particles: Math.floor(Math.random() * (47 - 18 + 1)) + 18,
-    eventType: EVENT_TYPES[Math.floor(Math.random() * EVENT_TYPES.length)],
-    timestamp: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-  };
-}
+const TRACK_LENGTH = 8;           // scale factor for real direction vectors
+const TRACK_DURATION = 2;         // seconds for tracks to fully extend
+const FLASH_DURATION = 0.3;       // seconds for impact flash
+const BEAM_SPEED = 12;            // units per second
+const BEAM_START_X = 15;          // starting distance from center
+const API_URL = "http://localhost:8000";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
 type CollisionStage = "idle" | "beams" | "impact" | "tracks" | "showing";
+
+interface CernEvent {
+  event_id: string;
+  invariant_mass: number;
+  energy_tev: string;
+  event_type: string;
+  particles: {
+    type: string;
+    charge: number;
+    color: string;
+    momentum: { px: number; py: number; pz: number };
+    energy: number;
+    eta: number;
+    phi: number;
+    pt: number;
+  }[];
+  track_directions: { x: number; y: number; z: number }[];
+}
+
+interface HudData {
+  energy: string;
+  eventType: string;
+  invariantMass: string;
+  eventId: string;
+  particles: number | string;
+  status: "connecting" | "ready" | "live";
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +59,12 @@ function randomDirection(): [number, number, number] {
   ];
 }
 
+async function fetchEvents(): Promise<CernEvent[]> {
+  const res = await fetch(`${API_URL}/events`);
+  if (!res.ok) throw new Error("Failed to fetch events");
+  return res.json();
+}
+
 // ─── CMS-style detector ───────────────────────────────────────────────────────
 
 function CMSDetector() {
@@ -57,17 +76,14 @@ function CMSDetector() {
 
   return (
     <group ref={groupRef}>
-      {/* Barrel — open cylinder along Z */}
       <mesh rotation={[Math.PI / 2, 0, 0]}>
         <cylinderGeometry args={[1.5, 1.5, 4, 48, 5, true]} />
         <meshBasicMaterial color="#00ffcc" wireframe />
       </mesh>
-      {/* Front endcap */}
       <mesh position={[0, 0, 2]}>
         <circleGeometry args={[1.5, 48]} />
         <meshBasicMaterial color="#00ffcc" wireframe side={THREE.DoubleSide} />
       </mesh>
-      {/* Back endcap */}
       <mesh position={[0, 0, -2]}>
         <circleGeometry args={[1.5, 48]} />
         <meshBasicMaterial color="#00ffcc" wireframe side={THREE.DoubleSide} />
@@ -77,7 +93,6 @@ function CMSDetector() {
 }
 
 // ─── beam spheres ────────────────────────────────────────────────────────────
-// Only visible during 'beams' stage. Moves toward center each frame.
 
 function BeamSpheres({
   stage,
@@ -93,7 +108,6 @@ function BeamSpheres({
   const prevStage = useRef<CollisionStage>("idle");
 
   useFrame((_, delta) => {
-    // Reset positions when entering 'beams' stage
     if (stage === "beams" && prevStage.current !== "beams") {
       x1.current = -BEAM_START_X;
       x2.current = BEAM_START_X;
@@ -102,21 +116,16 @@ function BeamSpheres({
 
     if (stage !== "beams") return;
 
-    // Accelerate toward center — ease-in by using distance-dependent speed
     const speed1 = BEAM_SPEED * (1 + (BEAM_START_X - Math.abs(x1.current)) / BEAM_START_X * 2);
-    const speed2 = speed1;
+    x1.current += speed1 * delta;
+    x2.current -= speed1 * delta;
 
-    x1.current += speed1 * delta;  // moving right (from -15 toward 0)
-    x2.current -= speed2 * delta;  // moving left  (from +15 toward 0)
-
-    // Clamp so they don't overshoot
     if (x1.current > 0) x1.current = 0;
     if (x2.current < 0) x2.current = 0;
 
     if (group1.current) group1.current.position.x = x1.current;
     if (group2.current) group2.current.position.x = x2.current;
 
-    // Impact when both spheres reach within 0.5 of center
     if (Math.abs(x1.current) < 0.5 && Math.abs(x2.current) < 0.5) {
       onImpact();
     }
@@ -145,7 +154,6 @@ function BeamSpheres({
 }
 
 // ─── collision flash ─────────────────────────────────────────────────────────
-// Bright white sphere at center, fades out over FLASH_DURATION.
 
 function CollisionFlash({
   stage,
@@ -218,19 +226,18 @@ function Track({ dir, color }: TrackData) {
   );
 }
 
-function ParticleTracks({ stage, onDone }: { stage: CollisionStage; onDone: () => void }) {
+function ParticleTracks({
+  stage,
+  onDone,
+  trackData,
+}: {
+  stage: CollisionStage;
+  onDone: () => void;
+  trackData: TrackData[];
+}) {
   const elapsed = useRef(0);
   const prevStage = useRef<CollisionStage>("idle");
   const doneFired = useRef(false);
-
-  const tracks = useMemo<TrackData[]>(
-    () =>
-      Array.from({ length: TRACK_COUNT }, () => ({
-        dir: randomDirection(),
-        color: COLORS[Math.floor(Math.random() * COLORS.length)],
-      })),
-    []
-  );
 
   useFrame((_, delta) => {
     if (stage === "tracks" && prevStage.current !== "tracks") {
@@ -248,29 +255,54 @@ function ParticleTracks({ stage, onDone }: { stage: CollisionStage; onDone: () =
     }
   });
 
-  // Render during both 'tracks' (animating) and 'showing' (persistent)
   if (stage !== "tracks" && stage !== "showing") return null;
 
   return (
     <>
-      {tracks.map((track, i) => (
+      {trackData.map((track, i) => (
         <Track key={i} dir={track.dir} color={track.color} />
       ))}
     </>
   );
 }
 
-// ─── collision controller (useFrame-driven state machine) ───────────────────
-// This component lives inside the Canvas and drives the state transitions.
+// ─── build track data from a CERN event ─────────────────────────────────────
+// Uses real track_directions + particle colors, plus random filler tracks.
+
+function buildTrackData(event: CernEvent): TrackData[] {
+  const tracks: TrackData[] = [];
+
+  // Real muon tracks from the event data
+  for (let i = 0; i < event.track_directions.length; i++) {
+    const d = event.track_directions[i];
+    const color = event.particles[i]?.color ?? "#ffffff";
+    tracks.push({ dir: [d.x, d.y, d.z], color });
+  }
+
+  // Fill remaining slots with random directions using particle colors
+  const colors = event.particles.map((p) => p.color);
+  while (tracks.length < 30) {
+    tracks.push({
+      dir: randomDirection(),
+      color: colors[tracks.length % colors.length],
+    });
+  }
+
+  return tracks;
+}
+
+// ─── collision controller ───────────────────────────────────────────────────
 
 function CollisionController({
   stage,
   setStage,
   trackKey,
+  trackData,
 }: {
   stage: CollisionStage;
   setStage: (s: CollisionStage) => void;
   trackKey: number;
+  trackData: TrackData[];
 }) {
   const handleImpact = useCallback(() => setStage("impact"), [setStage]);
   const handleFlashDone = useCallback(() => setStage("tracks"), [setStage]);
@@ -280,12 +312,15 @@ function CollisionController({
     <>
       <BeamSpheres stage={stage} onImpact={handleImpact} />
       <CollisionFlash stage={stage} onDone={handleFlashDone} />
-      <ParticleTracks key={trackKey} stage={stage} onDone={handleTracksDone} />
+      <ParticleTracks
+        key={trackKey}
+        stage={stage}
+        onDone={handleTracksDone}
+        trackData={trackData}
+      />
     </>
   );
 }
-
-// ─── scene root ──────────────────────────────────────────────────────────────
 
 // ─── shared HUD styles ───────────────────────────────────────────────────────
 
@@ -305,23 +340,79 @@ const HUD_PANEL: React.CSSProperties = {
   userSelect: "none",
 };
 
+// ─── scene root ──────────────────────────────────────────────────────────────
+
 export default function Home() {
   const [stage, setStage] = useState<CollisionStage>("idle");
   const [trackKey, setTrackKey] = useState(0);
-  const [eventStats, setEventStats] = useState({
-    energy:    "-- TeV",
-    particles: "--" as number | string,
-    eventType: "READY",
-    timestamp: "--:--:--",
+  const [trackData, setTrackData] = useState<TrackData[]>([]);
+
+  // Event buffer — stores 10 events, cycles through them
+  const eventsRef = useRef<CernEvent[]>([]);
+  const indexRef = useRef(0);
+
+  const [hud, setHud] = useState<HudData>({
+    energy: "-- TeV",
+    eventType: "CONNECTING TO CERN DATA...",
+    invariantMass: "-- GeV",
+    eventId: "--",
+    particles: "--",
+    status: "connecting",
   });
 
-  const canFire = stage === "idle" || stage === "showing";
+  // Fetch 10 events from API
+  const loadEvents = useCallback(async () => {
+    try {
+      const data = await fetchEvents();
+      eventsRef.current = data;
+      indexRef.current = 0;
+      setHud((prev) => ({
+        ...prev,
+        status: prev.status === "connecting" ? "ready" : prev.status,
+        eventType: prev.status === "connecting" ? "READY" : prev.eventType,
+      }));
+    } catch (err) {
+      console.error("Failed to fetch CERN events:", err);
+    }
+  }, []);
+
+  // Fetch on mount
+  useEffect(() => {
+    loadEvents();
+  }, [loadEvents]);
+
+  const canFire = (stage === "idle" || stage === "showing") && eventsRef.current.length > 0;
+
   const handleFire = useCallback(() => {
     if (!canFire) return;
-    setEventStats(randomEventStats());   // new random stats each collision
+
+    const events = eventsRef.current;
+    const idx = indexRef.current;
+    const event = events[idx];
+
+    // Update HUD with real event data
+    setHud({
+      energy: event.energy_tev,
+      eventType: event.event_type,
+      invariantMass: event.invariant_mass.toFixed(3) + " GeV",
+      eventId: event.event_id,
+      particles: 2,
+      status: "live",
+    });
+
+    // Build track data from real directions
+    setTrackData(buildTrackData(event));
     setTrackKey((k) => k + 1);
     setStage("beams");
-  }, [canFire]);
+
+    // Advance index — auto-refetch when we've used all 10
+    const nextIdx = idx + 1;
+    if (nextIdx >= events.length) {
+      loadEvents(); // Fetch fresh batch
+    } else {
+      indexRef.current = nextIdx;
+    }
+  }, [canFire, loadEvents]);
 
   return (
     <div style={{ width: "100vw", height: "100vh", background: "#000", position: "relative" }}>
@@ -330,7 +421,12 @@ export default function Home() {
         <pointLight position={[5, 5, 5]} intensity={60} color="#ffffff" />
 
         <CMSDetector />
-        <CollisionController stage={stage} setStage={setStage} trackKey={trackKey} />
+        <CollisionController
+          stage={stage}
+          setStage={setStage}
+          trackKey={trackKey}
+          trackData={trackData}
+        />
 
         <OrbitControls enablePan={false} />
 
@@ -358,12 +454,21 @@ export default function Home() {
       </div>
 
       {/* ── HUD: top-right event stats ── */}
-      <div style={{ ...HUD_PANEL, top: "1.25rem", right: "1.25rem", minWidth: "210px" }}>
-        <div style={{ marginBottom: "0.3rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>EVENT DATA</div>
-        <div><span style={{ color: "#aaa" }}>COLLISION ENERGY:</span> {eventStats.energy}</div>
-        <div><span style={{ color: "#aaa" }}>PARTICLES DETECTED:</span> {eventStats.particles}</div>
-        <div><span style={{ color: "#aaa" }}>EVENT TYPE:</span> {eventStats.eventType}</div>
-        <div><span style={{ color: "#aaa" }}>TIMESTAMP:</span> {eventStats.timestamp}</div>
+      <div style={{ ...HUD_PANEL, top: "1.25rem", right: "1.25rem", minWidth: "240px" }}>
+        <div style={{ marginBottom: "0.3rem", fontWeight: "bold", fontSize: "0.65rem", color: "rgba(0,255,204,0.5)" }}>
+          EVENT DATA
+        </div>
+        {hud.status === "connecting" ? (
+          <div style={{ color: "#ffcc00" }}>{hud.eventType}</div>
+        ) : (
+          <>
+            <div><span style={{ color: "#aaa" }}>COLLISION ENERGY:</span> {hud.energy}</div>
+            <div><span style={{ color: "#aaa" }}>EVENT TYPE:</span> {hud.eventType}</div>
+            <div><span style={{ color: "#aaa" }}>INVARIANT MASS:</span> {hud.invariantMass}</div>
+            <div><span style={{ color: "#aaa" }}>EVENT ID:</span> {hud.eventId}</div>
+            <div><span style={{ color: "#aaa" }}>PARTICLES DETECTED:</span> {hud.particles}</div>
+          </>
+        )}
       </div>
 
       {/* ── HUD: bottom-left data source ── */}
@@ -373,12 +478,14 @@ export default function Home() {
             width: 6,
             height: 6,
             borderRadius: "50%",
-            background: "#0f0",
+            background: hud.status === "connecting" ? "#ffcc00" : "#0f0",
             display: "inline-block",
             animation: "hud-pulse 1.8s ease-in-out infinite",
           }}
         />
-        <span style={{ color: "#aaa", fontSize: "0.6rem" }}>LIVE</span>
+        <span style={{ color: "#aaa", fontSize: "0.6rem" }}>
+          {hud.status === "connecting" ? "CONNECTING" : "LIVE"}
+        </span>
         <span style={{ fontSize: "0.6rem" }}>DATA SOURCE: CERN OPEN DATA PORTAL</span>
       </div>
 
