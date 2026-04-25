@@ -6,6 +6,51 @@ import { Line, OrbitControls } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { Line2 } from "three-stdlib";
 import * as THREE from "three";
+import "./collider.css";
+
+// ─── confidence helpers ──────────────────────────────────────────────────────
+
+interface ConfidenceData {
+  score: number;
+  label: string;
+  interpretation: string;
+  breakdown?: { energy_feasibility: number; beam_compatibility: number; decay_naturalness: number };
+}
+
+const CONF_COLORS: Record<string, string> = {
+  HIGH: "#00ffcc",
+  MODERATE: "#ffcc00",
+  LOW: "#ff8800",
+  SPECULATIVE: "#ff3355",
+};
+
+function ConfidenceBar({ score, label, compact }: { score: number; label: string; compact?: boolean }) {
+  const color = CONF_COLORS[label] ?? "#00ffcc";
+  const pct = Math.round(score * 100);
+  const filled = Math.round(score * 10);
+  const empty = 10 - filled;
+  const bar = "█".repeat(filled) + "░".repeat(empty);
+  if (compact) {
+    return (
+      <div style={{ marginTop: "0.25rem" }}>
+        <span style={{ color: "#aaa" }}>CONFIDENCE:</span>{" "}
+        <span style={{ color, fontWeight: "bold" }}>{bar}</span>{" "}
+        <span style={{ color }}>{label} ({pct}%)</span>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
+        PREDICTION CONFIDENCE
+      </div>
+      <div style={{ fontSize: "0.7rem", marginBottom: "0.15rem" }}>
+        <span style={{ color, fontWeight: "bold" }}>{bar}</span>{" "}
+        <span style={{ color }}>{pct}% — {label}</span>
+      </div>
+    </div>
+  );
+}
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -58,6 +103,7 @@ interface CernEvent {
   event_type: string;
   resolved_type?: string;
   is_custom?: boolean;
+  confidence?: ConfidenceData;
   particles: CernParticle[];
   track_directions: { x: number; y: number; z: number }[];
 }
@@ -100,6 +146,7 @@ interface HudData {
   particles: number | string;
   status: "connecting" | "ready" | "live";
   isCustom?: boolean;
+  confidence?: ConfidenceData | null;
 }
 
 type TrackData = {
@@ -422,7 +469,7 @@ const HUD_PANEL: React.CSSProperties = {
 
 // ─── scene root ──────────────────────────────────────────────────────────────
 
-export default function Home() {
+function ColliderScene() {
   const [stage, setStage] = useState<CollisionStage>("idle");
   const [trackKey, setTrackKey] = useState(0);
   const [trackData, setTrackData] = useState<TrackData[]>([]);
@@ -532,6 +579,7 @@ export default function Home() {
       particles: 2,
       status: "live",
       isCustom: false,
+      confidence: null,
     });
 
     setActiveInfo(info);
@@ -571,6 +619,7 @@ export default function Home() {
         particles: event.particles.length,
         status: "live",
         isCustom: true,
+        confidence: event.confidence ?? null,
       });
 
       setActiveInfo(info);
@@ -691,15 +740,7 @@ export default function Home() {
         </EffectComposer>
       </Canvas>
 
-      {/* ── CSS animations ── */}
-      <style>{`
-        @keyframes hud-pulse{0%,100%{opacity:.35;box-shadow:0 0 4px #0f0}50%{opacity:1;box-shadow:0 0 10px #0f0}}
-        @keyframes slide-in-right{from{transform:translateX(120%);opacity:0}to{transform:translateX(0);opacity:1}}
-        input[type=range]{-webkit-appearance:none;appearance:none;background:rgba(0,255,204,0.15);height:4px;border-radius:2px;outline:none;}
-        input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#00ffcc;cursor:pointer;box-shadow:0 0 8px rgba(0,255,204,0.5);}
-        select.cyber-select{-webkit-appearance:none;appearance:none;background:rgba(0,0,0,0.6);color:#00ffcc;border:1px solid rgba(0,255,204,0.3);border-radius:2px;padding:0.3rem 0.5rem;font-family:monospace;font-size:0.6rem;text-transform:uppercase;letter-spacing:0.05em;cursor:pointer;width:100%;outline:none;}
-        select.cyber-select:focus{border-color:#00ffcc;}
-      `}</style>
+      {/* ── CSS animations loaded from collider.css ── */}
 
       {/* ── HUD: top-left title ── */}
       <div style={{ ...HUD_PANEL, top: "1.25rem", left: "1.25rem" }}>
@@ -931,6 +972,9 @@ export default function Home() {
             <div><span style={{ color: "#aaa" }}>INVARIANT MASS:</span> {hud.invariantMass}</div>
             <div><span style={{ color: "#aaa" }}>EVENT ID:</span> {hud.eventId}</div>
             <div><span style={{ color: "#aaa" }}>PARTICLES DETECTED:</span> {hud.particles}</div>
+            {hud.isCustom && hud.confidence && (
+              <ConfidenceBar score={hud.confidence.score} label={hud.confidence.label} compact />
+            )}
           </>
         )}
       </div>
@@ -1013,9 +1057,20 @@ export default function Home() {
           <div style={{ fontWeight: "bold", fontSize: "0.6rem", color: "rgba(0,255,204,0.5)", textTransform: "uppercase", marginBottom: "0.15rem" }}>
             DID YOU KNOW
           </div>
-          <div style={{ color: "#ccc", fontSize: "0.62rem" }}>
+          <div style={{ color: "#ccc", fontSize: "0.62rem", marginBottom: hud.isCustom && hud.confidence ? "0.5rem" : 0 }}>
             {activeInfo.did_you_know}
           </div>
+
+          {hud.isCustom && hud.confidence && (
+            <>
+              <div style={{ borderTop: "1px solid rgba(0,255,204,0.15)", marginTop: "0.3rem", paddingTop: "0.4rem" }}>
+                <ConfidenceBar score={hud.confidence.score} label={hud.confidence.label} />
+                <div style={{ color: "#999", fontSize: "0.55rem", marginTop: "0.2rem", lineHeight: 1.45 }}>
+                  {hud.confidence.interpretation}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -1122,5 +1177,380 @@ export default function Home() {
         {sceneMode === "custom" ? "⚡ Fire Custom Collision" : "⬡ Fire Collision"}
       </button>
     </div>
+  );
+}
+
+// ─── Scene 1: LHC Circuit ────────────────────────────────────────────────────
+
+const LHC_RING_R = 5;
+const ORBIT_SPD  = 1.8; // rad/s
+
+// Trail gradient: bright blue-white at head → black at tail (12 points)
+const ORBIT_CLR_BLUE: [number, number, number][] = Array.from({ length: 12 }, (_, i) => {
+  const b = 1 - i / 11;
+  return [b * 0.4, b * 0.85, b];
+});
+const ORBIT_CLR_RED: [number, number, number][] = Array.from({ length: 12 }, (_, i) => {
+  const b = 1 - i / 11;
+  return [b, b * 0.12, b * 0.04];
+});
+
+// 8 particles: 4 CW (blue beam 1), 4 CCW (red beam 2)
+const ORBIT_PARTICLES: { angle: number; cw: boolean }[] = [
+  { angle: 0,                  cw: true  },
+  { angle: Math.PI / 2,        cw: true  },
+  { angle: Math.PI,            cw: true  },
+  { angle: 3 * Math.PI / 2,   cw: true  },
+  { angle: Math.PI / 4,        cw: false },
+  { angle: 3 * Math.PI / 4,   cw: false },
+  { angle: 5 * Math.PI / 4,   cw: false },
+  { angle: 7 * Math.PI / 4,   cw: false },
+];
+
+function OrbitParticle({ angle: start, cw }: { angle: number; cw: boolean }) {
+  const meshRef  = useRef<THREE.Mesh>(null);
+  const lightRef = useRef<THREE.PointLight>(null);
+  const trailRef = useRef<Line2>(null);
+  const angleRef = useRef(start);
+  const buf      = useRef(new Float32Array(12 * 3));
+
+  const trailInit = useMemo<[number, number, number][]>(() =>
+    Array.from({ length: 12 }, (_, i) => {
+      const a = start - (cw ? 1 : -1) * i * 0.09;
+      return [Math.cos(a) * LHC_RING_R, 0, Math.sin(a) * LHC_RING_R];
+    }), [start, cw]);
+
+  useFrame((_, delta) => {
+    angleRef.current += (cw ? 1 : -1) * ORBIT_SPD * delta;
+    const a = angleRef.current;
+    const x = Math.cos(a) * LHC_RING_R;
+    const z = Math.sin(a) * LHC_RING_R;
+    if (meshRef.current)  meshRef.current.position.set(x, 0, z);
+    if (lightRef.current) lightRef.current.position.set(x, 0, z);
+    if (trailRef.current) {
+      for (let i = 0; i < 12; i++) {
+        const ta = a - (cw ? 1 : -1) * i * 0.09;
+        buf.current[i * 3]     = Math.cos(ta) * LHC_RING_R;
+        buf.current[i * 3 + 1] = 0;
+        buf.current[i * 3 + 2] = Math.sin(ta) * LHC_RING_R;
+      }
+      trailRef.current.geometry.setPositions(buf.current);
+    }
+  });
+
+  const sx = Math.cos(start) * LHC_RING_R;
+  const sz = Math.sin(start) * LHC_RING_R;
+
+  return (
+    <>
+      <mesh ref={meshRef} position={[sx, 0, sz]}>
+        <sphereGeometry args={[0.09, 8, 8]} />
+        <meshBasicMaterial color={cw ? "#aaddff" : "#ff6644"} />
+      </mesh>
+      <pointLight ref={lightRef} position={[sx, 0, sz]} intensity={22} distance={3.5}
+        color={cw ? "#88ccff" : "#ff5533"} />
+      <Line ref={trailRef} points={trailInit}
+        vertexColors={cw ? ORBIT_CLR_BLUE : ORBIT_CLR_RED} lineWidth={1.5} />
+    </>
+  );
+}
+
+function CircuitCameraRig() {
+  const { camera } = useThree();
+  const t = useRef(0);
+  useFrame((_, delta) => {
+    t.current = Math.min(t.current + delta / 4, 1);
+    const ease = t.current * t.current;
+    camera.position.set(0, 5 + ease * 3.5, 9 + ease * 4);
+    camera.lookAt(0, 0, 0);
+  });
+  return null;
+}
+
+function LHCCircuit({ onComplete, onSkip }: { onComplete: () => void; onSkip: () => void }) {
+  const [ti, setTi] = useState(-1);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  useEffect(() => {
+    timers.current = [
+      setTimeout(() => setTi(0), 300),   // "C E R N"
+      setTimeout(() => setTi(1), 800),   // "LARGE HADRON COLLIDER"
+      setTimeout(() => setTi(2), 2000),  // subtitle
+      setTimeout(() => setTi(3), 3500),  // fade all out
+      setTimeout(onComplete, 4000),
+    ];
+    return () => timers.current.forEach(clearTimeout);
+  }, [onComplete]);
+
+  const skipBtnStyle: React.CSSProperties = {
+    position: "absolute", bottom: "2rem", right: "2rem",
+    background: "rgba(0,0,0,0.5)", color: "#556", border: "1px solid #334",
+    borderRadius: "2px", padding: "0.4rem 1rem", fontFamily: "monospace",
+    fontSize: "0.6rem", letterSpacing: "0.1em", textTransform: "uppercase",
+    cursor: "pointer", zIndex: 60,
+  };
+
+  return (
+    <div style={{ width: "100vw", height: "100vh", background: "#000510", position: "relative", overflow: "hidden" }}>
+      <Canvas camera={{ position: [0, 5, 9], fov: 65, near: 0.1, far: 100 }}>
+        <CircuitCameraRig />
+        <ambientLight intensity={0.03} />
+
+        {/* LHC main ring (27 km) */}
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[LHC_RING_R, 0.05, 8, 120]} />
+          <meshBasicMaterial color="#00ffcc" />
+        </mesh>
+        {/* SPS pre-injector ring */}
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[1.2, 0.03, 8, 80]} />
+          <meshBasicMaterial color="#00aacc" />
+        </mesh>
+        {/* PS ring */}
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.5, 0.02, 8, 60]} />
+          <meshBasicMaterial color="#007799" />
+        </mesh>
+
+        {/* Swiss Alps silhouette — dark layered box shapes at horizon */}
+        {([-9, -5.5, -2, 2, 5.5, 9] as number[]).map((x, i) => (
+          <mesh key={i} position={[x, -1.9 + (i % 3) * 0.2, -9]}>
+            <boxGeometry args={[2.5 + (i % 3), 1.2 + (i % 2) * 2.2, 0.3]} />
+            <meshBasicMaterial color="#06060f" />
+          </mesh>
+        ))}
+
+        {/* 8 orbiting proton bunches */}
+        {ORBIT_PARTICLES.map((p, i) => (
+          <OrbitParticle key={i} angle={p.angle} cw={p.cw} />
+        ))}
+
+        <EffectComposer>
+          <Bloom intensity={2} luminanceThreshold={0.15} luminanceSmoothing={0.9} mipmapBlur />
+        </EffectComposer>
+      </Canvas>
+
+      {/* "C E R N" — fades in at 0.3s, out at 3.5s */}
+      <div style={{
+        position: "absolute", top: "10%", left: "50%", transform: "translateX(-50%)",
+        fontFamily: "monospace", fontSize: "0.75rem", fontWeight: "bold", color: "#fff",
+        letterSpacing: "0.65em", textTransform: "uppercase", textAlign: "center",
+        opacity: ti >= 0 && ti < 3 ? 1 : 0, transition: "opacity 0.5s ease",
+        textShadow: "0 0 12px rgba(0,255,204,0.55)", pointerEvents: "none",
+      }}>C &nbsp; E &nbsp; R &nbsp; N</div>
+
+      {/* "LARGE HADRON COLLIDER" — visible at ti=1,2 */}
+      <div style={{
+        position: "absolute", top: "44%", left: "50%",
+        transform: "translate(-50%, -50%)",
+        fontFamily: "monospace", fontSize: "1.6rem", fontWeight: "bold",
+        color: "#fff", letterSpacing: "0.12em", textTransform: "uppercase", textAlign: "center",
+        opacity: ti === 1 || ti === 2 ? 1 : 0, transition: "opacity 0.6s ease",
+        textShadow: "0 0 24px rgba(0,255,204,0.4)", pointerEvents: "none",
+      }}>LARGE HADRON COLLIDER</div>
+
+      {/* Subtitle — visible at ti=2 only */}
+      <div style={{
+        position: "absolute", top: "55%", left: "50%", transform: "translateX(-50%)",
+        fontFamily: "monospace", fontSize: "0.68rem", color: "rgba(0,255,204,0.85)",
+        letterSpacing: "0.1em", textAlign: "center",
+        opacity: ti === 2 ? 1 : 0, transition: "opacity 0.5s ease",
+        pointerEvents: "none",
+      }}>Geneva, Switzerland — 27 km circumference</div>
+
+      <button onClick={onSkip} style={skipBtnStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "#00ffcc"; e.currentTarget.style.borderColor = "#00ffcc"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "#556";    e.currentTarget.style.borderColor = "#334"; }}
+      >SKIP INTRO ›</button>
+    </div>
+  );
+}
+
+// ─── Scene 2: POV Tunnel Rush ─────────────────────────────────────────────────
+
+function TunnelCamera() {
+  const { camera } = useThree();
+  const elapsed = useRef(0);
+  useFrame((_, delta) => {
+    elapsed.current += delta;
+    const t    = Math.min(elapsed.current / 5, 1);
+    const ease = t * t * t; // exponential: slow → very fast
+    camera.position.set(0, 0, -ease * 220);
+  });
+  return null;
+}
+
+function LHCTunnel({ onComplete, onSkip }: { onComplete: () => void; onSkip: () => void }) {
+  const [textIdx, setTextIdx] = useState(-1);
+  const [flashOpacity, setFlashOpacity] = useState(0);
+  const timerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
+
+  // Five text cards — the full sequence for the tunnel POV phase
+  const texts = useMemo(() => [
+    { time:  200, text: "99.9999991% THE SPEED OF LIGHT",   size: "1.6rem", top: "45%", pulse: false, color: "#ffffff" },
+    { time: 1800, text: "10 BILLION COLLISIONS PER SECOND", size: "1.6rem", top: "45%", pulse: false, color: "#ffffff" },
+    { time: 3200, text: "INITIATING COLLISION SEQUENCE",    size: "1.6rem", top: "45%", pulse: true,  color: "#00ffcc" },
+    { time: 4000, text: "⚠  BEAM CROSSING IMMINENT",       size: "1.1rem", top: "45%", pulse: true,  color: "#ff6600" },
+  ], []);
+
+  useEffect(() => {
+    texts.forEach((t, i) =>
+      timerRefs.current.push(setTimeout(() => setTextIdx(i), t.time))
+    );
+    timerRefs.current.push(setTimeout(() => setFlashOpacity(1), 4800));
+    timerRefs.current.push(setTimeout(onComplete, 5200));
+    return () => timerRefs.current.forEach(clearTimeout);
+  }, [onComplete, texts]);
+
+  const rings = useMemo(() => {
+    const arr: number[] = [];
+    for (let z = -8; z > -250; z -= 8) arr.push(z);
+    return arr;
+  }, []);
+
+  // Client-side only — avoids SSR hydration mismatch with Math.random
+  const [beams, setBeams] = useState<[number, number][]>([]);
+  useEffect(() => {
+    const arr: [number, number][] = [];
+    for (let i = 0; i < 60; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = Math.random() * 1.2;
+      arr.push([Math.cos(a) * r, Math.sin(a) * r]);
+    }
+    setBeams(arr);
+  }, []);
+
+  const skipBtnStyle: React.CSSProperties = {
+    position: "absolute", bottom: "2rem", right: "2rem",
+    background: "rgba(0,0,0,0.5)", color: "#556", border: "1px solid #334",
+    borderRadius: "2px", padding: "0.4rem 1rem", fontFamily: "monospace",
+    fontSize: "0.6rem", letterSpacing: "0.1em", textTransform: "uppercase",
+    cursor: "pointer", zIndex: 60,
+  };
+
+  return (
+    <div style={{ width: "100vw", height: "100vh", background: "#000", position: "relative", overflow: "hidden" }}>
+      <Canvas camera={{ position: [0, 0, 0], fov: 75, near: 0.1, far: 350 }}>
+        <TunnelCamera />
+        <ambientLight intensity={0.05} />
+
+        {/* Tunnel interior */}
+        <mesh rotation={[Math.PI / 2, 0, 0]} position={[0, 0, -125]}>
+          <cylinderGeometry args={[4, 4, 250, 32, 1, true]} />
+          <meshStandardMaterial color="#111118" emissive="#000a14" emissiveIntensity={2} side={THREE.BackSide} />
+        </mesh>
+
+        {/* Glowing ring markers every 8 units */}
+        {rings.map((z) => (
+          <mesh key={z} position={[0, 0, z]}>
+            <torusGeometry args={[3.8, 0.04, 8, 48]} />
+            <meshBasicMaterial color="#00ffcc" />
+          </mesh>
+        ))}
+
+        {/* Beam particle streaks — 60 lines parallel to tunnel axis */}
+        {beams.map(([bx, by], i) => (
+          <Line key={i} points={[[bx, by, 2], [bx, by, -250]]} color="#00aaff" lineWidth={1} />
+        ))}
+
+        <EffectComposer>
+          <Bloom intensity={1.5} luminanceThreshold={0.3} luminanceSmoothing={0.9} mipmapBlur />
+        </EffectComposer>
+      </Canvas>
+
+      {/* Text overlays — pulse-text / fade-in-text keyframes from collider.css */}
+      {texts.map((t, i) => (
+        <div key={i} style={{
+          position: "absolute", top: t.top, left: "50%",
+          transform: "translateX(-50%)",
+          fontFamily: "monospace", fontSize: t.size, fontWeight: "bold",
+          color: t.color, letterSpacing: "0.18em",
+          textTransform: "uppercase", textAlign: "center",
+          opacity: textIdx === i ? 1 : 0,
+          animation: textIdx === i
+            ? (t.pulse ? "pulse-text 0.8s ease-in-out infinite" : "fade-in-text 0.5s ease-out")
+            : "none",
+          transition: "opacity 0.4s ease",
+          pointerEvents: "none",
+          textShadow: "0 0 20px rgba(0,255,204,0.4)",
+        }}>{t.text}</div>
+      ))}
+
+      {/* White flash — expands to fill screen then transitions to main app */}
+      <div style={{
+        position: "absolute", inset: 0, background: "#fff",
+        opacity: flashOpacity, transition: "opacity 0.4s ease-in",
+        pointerEvents: "none", zIndex: 50,
+      }} />
+
+      <button onClick={onSkip} style={skipBtnStyle}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "#00ffcc"; e.currentTarget.style.borderColor = "#00ffcc"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "#556";    e.currentTarget.style.borderColor = "#334"; }}
+      >SKIP INTRO ›</button>
+    </div>
+  );
+}
+
+// ─── Page wrapper — 3-phase intro ────────────────────────────────────────────
+//
+// introPhase:
+//   "circuit" → LHC ring overview with orbiting particles (4 s)
+//   "tunnel"  → POV beam-pipe rush with text cards + flash (5 s)
+//   "done"    → ColliderScene revealed
+//
+// ColliderScene is always mounted (opacity:0 during intro) so it pre-loads
+// CERN API data and Three.js assets while the intro plays.
+
+type IntroPhase = "circuit" | "tunnel" | "done";
+
+export default function Page() {
+  const [mounted,     setMounted]     = useState(false);
+  const [introPhase,  setIntroPhase]  = useState<IntroPhase>("circuit");
+
+  useEffect(() => {
+    setMounted(true);
+    if (typeof window !== "undefined" && sessionStorage.getItem("introSeen")) {
+      setIntroPhase("done");
+    }
+  }, []);
+
+  const handleSkip = useCallback(() => {
+    sessionStorage.setItem("introSeen", "true");
+    setIntroPhase("done");
+  }, []);
+
+  const handleCircuitDone = useCallback(() => setIntroPhase("tunnel"), []);
+
+  const handleTunnelDone = useCallback(() => {
+    sessionStorage.setItem("introSeen", "true");
+    setIntroPhase("done");
+  }, []);
+
+  if (!mounted) return null;
+
+  return (
+    <>
+      {/* Main collider — always mounted; opacity drives the reveal after flash */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 1,
+        opacity: introPhase === "done" ? 1 : 0,
+        pointerEvents: introPhase === "done" ? "auto" : "none",
+        transition: "opacity 0.5s ease-out",
+      }}>
+        <ColliderScene />
+      </div>
+
+      {/* Intro overlay — unmounts once done */}
+      {introPhase !== "done" && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 10 }}>
+          {introPhase === "circuit" && (
+            <LHCCircuit onComplete={handleCircuitDone} onSkip={handleSkip} />
+          )}
+          {introPhase === "tunnel" && (
+            <LHCTunnel onComplete={handleTunnelDone} onSkip={handleSkip} />
+          )}
+        </div>
+      )}
+    </>
   );
 }

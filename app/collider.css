@@ -1,0 +1,65 @@
+/* ─── HUD animations ────────────────────────────────────────────────────────── */
+
+@keyframes hud-pulse {
+  0%, 100% { opacity: .35; box-shadow: 0 0 4px #0f0; }
+  50% { opacity: 1; box-shadow: 0 0 10px #0f0; }
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(120%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ─── Custom controls ───────────────────────────────────────────────────────── */
+
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(0, 255, 204, 0.15);
+  height: 4px;
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #00ffcc;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(0, 255, 204, 0.5);
+}
+
+select.cyber-select {
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #00ffcc;
+  border: 1px solid rgba(0, 255, 204, 0.3);
+  border-radius: 2px;
+  padding: 0.3rem 0.5rem;
+  font-family: monospace;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  width: 100%;
+  outline: none;
+}
+
+select.cyber-select:focus {
+  border-color: #00ffcc;
+}
+
+/* ─── LHC Tunnel intro animations ───────────────────────────────────────────── */
+
+@keyframes pulse-text {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes fade-in-text {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
